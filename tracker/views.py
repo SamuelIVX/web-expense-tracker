@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.http import HttpResponse, HttpResponseNotAllowed
-from django.shortcuts import render, redirect
+from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
@@ -322,3 +322,19 @@ def transaction_history_view(request):
         'preserved_query': preserved_query,
     }
     return render(request, 'tracker/history.html', context)
+
+@login_required
+def delete_transaction_view(request, pk):
+    """
+    Safely deletes a transaction owned by the authenticated user via POST.
+    Prevents unauthorized deletion of transactions belonging to other users.
+    """
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+
+    tx = get_object_or_404(Transaction, pk=pk, user=request.user)
+    amount = tx.amount
+    category_name = tx.category.name
+    tx.delete()
+    messages.success(request, f"Deleted expense of ${amount:.2f} for {category_name}.")
+    return redirect('transaction_history')
