@@ -24,8 +24,14 @@ if not SECRET_KEY:
 
 ALLOWED_HOSTS = [
     h.strip()
-    for h in os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',')
+    for h in os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost,.pythonanywhere.com').split(',')
     if h.strip()
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    'https://*.pythonanywhere.com',
+    'http://127.0.0.1:8000',
+    'http://localhost:8000',
 ]
 
 INSTALLED_APPS = [
