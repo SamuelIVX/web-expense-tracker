@@ -85,7 +85,7 @@
         </span>
     </div>
 
-    <div class="et-progress" role="progressbar" aria-valuenow="{{ progress_width|unlocalize }}" aria-valuemin="0" aria-valuemax="100" aria-label="Monthly budget used ({{ budget_percentage }}%)">
+    <div class="et-progress" role="progressbar" aria-valuenow="{{ progress_width|unlocalize }}" aria-valuemin="0" aria-valuemax="100" aria-label="Monthly budget used ({{ budget_percentage }}%)" data-status="{% if is_over_budget %}danger{% elif budget_percentage >= 70 %}warn{% else %}normal{% endif %}">
         <div class="et-progress__bar {{ progress_class }}" style="width: {{ progress_width|unlocalize }}%;"></div>
     </div>
 </div>
