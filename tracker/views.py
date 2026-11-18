@@ -2,13 +2,25 @@
 Views for the tracker application.
 """
 
+import calendar
+import json
+from decimal import Decimal, InvalidOperation
+from django.core.exceptions import ValidationError
+from django.http import HttpResponseNotAllowed
 from django.shortcuts import render, redirect
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.db import IntegrityError, transaction
-from .models import Transaction
+from django.utils import timezone
+from .models import Transaction, UserProfile
 from .forms import RegisterForm, TransactionForm
+from .constants import DEFAULT_MONTHLY_BUDGET
+from .queries import (
+    get_monthly_spending_summary,
+    get_monthly_category_breakdown,
+    get_recent_transactions,
+)
 
 def index(request):
     """
@@ -42,6 +54,109 @@ def register_view(request):
         form = RegisterForm()
 
     return render(request, 'registration/register.html', {'form': form})
+
+@login_required
+def dashboard_view(request):
+    """
+    Renders user spending metrics, monthly budget progress, category breakdown,
+    and recent activity aggregated through Django ORM queries.
+    """
+    today = timezone.localdate()
+    start_of_month = today.replace(day=1)
+    _, last_day = calendar.monthrange(today.year, today.month)
+    end_of_month = today.replace(day=last_day)
+    month_name = today.strftime('%B %Y')
+
+    user_id = request.user.id
+    summary = get_monthly_spending_summary(user_id, start_of_month, end_of_month)
+    total_spent = summary['total_spent']
+    tx_count = summary['tx_count']
+
+    category_breakdown = get_monthly_category_breakdown(
+        user_id, start_of_month, end_of_month, total_spent=total_spent
+    )
+    category_breakdown_data = [
+        {
+            'category_id': item['category_id'],
+            'name': item['name'],
+            'color': item['color'],
+            'total': float(item['total']),
+            'tx_count': item['tx_count'],
+            'percentage': item['percentage'],
+        }
+        for item in category_breakdown
+    ]
+    category_breakdown_json = json.dumps(category_breakdown_data)
+    recent_transactions = get_recent_transactions(user_id, limit=5)
+
+    profile, _ = UserProfile.objects.get_or_create(
+        user=request.user,
+        defaults={'monthly_budget': DEFAULT_MONTHLY_BUDGET}
+    )
+    budget = profile.monthly_budget
+    if budget > 0:
+        budget_ratio = (total_spent / budget) * Decimal('100')
+    else:
+        budget_ratio = Decimal('0')
+
+    progress_width = min(budget_ratio, Decimal('100.0'))
+    budget_remaining = budget - total_spent
+    is_over_budget = total_spent > budget
+    over_budget_amount = total_spent - budget if is_over_budget else Decimal('0')
+
+    if budget_ratio >= Decimal('90.0'):
+        progress_class = "et-progress__bar--danger"
+    elif budget_ratio >= Decimal('70.0'):
+        progress_class = "et-progress__bar--warn"
+    else:
+        progress_class = ""
+
+    context = {
+        'month_name': month_name,
+        'total_spent': total_spent,
+        'tx_count': tx_count,
+        'budget': budget,
+        'budget_percentage': round(float(budget_ratio), 1),
+        'progress_width': round(float(progress_width), 1),
+        'budget_remaining': budget_remaining,
+        'is_over_budget': is_over_budget,
+        'over_budget_amount': over_budget_amount,
+        'progress_class': progress_class,
+        'category_breakdown': category_breakdown,
+        'category_breakdown_data': category_breakdown_data,
+        'category_breakdown_json': category_breakdown_json,
+        'recent_transactions': recent_transactions,
+    }
+    return render(request, 'tracker/dashboard.html', context)
+
+@login_required
+def update_budget_view(request):
+    """
+    Updates the authenticated user's monthly budget benchmark via POST.
+    Rejects non-numeric, negative, zero, or sub-cent fractional values.
+    """
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+
+    raw_budget = request.POST.get('monthly_budget', '').strip()
+    try:
+        new_budget = Decimal(raw_budget)
+        if new_budget.as_tuple().exponent < -2:
+            raise ValidationError("Budget cannot have fractional cents beyond two decimal places.")
+        if new_budget <= Decimal('0.00') or new_budget > Decimal('999999.99'):
+            raise ValidationError("Budget must be between $0.01 and $999,999.99.")
+    except (InvalidOperation, ValidationError, TypeError, ValueError):
+        messages.error(request, "Please enter a valid monthly budget amount between $0.01 and $999,999.99.")
+        return redirect('dashboard')
+
+    profile, _ = UserProfile.objects.get_or_create(
+        user=request.user,
+        defaults={'monthly_budget': DEFAULT_MONTHLY_BUDGET}
+    )
+    profile.monthly_budget = new_budget
+    profile.save()
+    messages.success(request, f"Monthly budget successfully updated to ${new_budget:.2f}.")
+    return redirect('dashboard')
 
 @login_required
 def add_transaction_view(request):

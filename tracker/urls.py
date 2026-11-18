@@ -9,6 +9,8 @@ from .forms import LoginForm
 
 urlpatterns = [
     path('', views.index, name='index'),
+    path('dashboard/', views.dashboard_view, name='dashboard'),
+    path('dashboard/budget/', views.update_budget_view, name='update_budget'),
     path('add/', views.add_transaction_view, name='add_transaction'),
     path('login/', auth_views.LoginView.as_view(
         template_name='registration/login.html',
