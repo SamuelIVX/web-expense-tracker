@@ -3,23 +3,27 @@ Views for the tracker application.
 """
 
 import calendar
+import csv
 import json
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from django.core.exceptions import ValidationError
-from django.http import HttpResponseNotAllowed
+from django.core.paginator import Paginator
+from django.http import HttpResponse, HttpResponseNotAllowed
 from django.shortcuts import render, redirect
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.db import IntegrityError, transaction
 from django.utils import timezone
-from .models import Transaction, UserProfile
+from .models import Category, Transaction, UserProfile
 from .forms import RegisterForm, TransactionForm
 from .constants import DEFAULT_MONTHLY_BUDGET
 from .queries import (
     get_monthly_spending_summary,
     get_monthly_category_breakdown,
     get_recent_transactions,
+    get_filtered_transactions,
 )
 
 def index(request):
@@ -158,6 +162,76 @@ def update_budget_view(request):
     messages.success(request, f"Monthly budget successfully updated to ${new_budget:.2f}.")
     return redirect('dashboard')
 
+def _sanitize_csv_cell(value):
+    """
+    Prevents CSV / Formula injection attacks (CWE-1236 / OWASP ASVS).
+    If a cell value starts with '=', '+', '-', '@', tab, or carriage return,
+    prepends a single quote to prevent spreadsheet formula execution.
+    """
+    if value is None:
+        return ''
+    str_val = str(value)
+    if str_val.startswith(('=', '+', '-', '@', '\t', '\r')):
+        return f"'{str_val}"
+    return str_val
+
+@login_required
+def export_transactions_csv_view(request):
+    """
+    Exports filtered or complete transaction history for the authenticated user as a downloadable CSV.
+    Respects active category, month, and search query filters, with CSV formula injection protection.
+    """
+    category_param = request.GET.get('category', '').strip()
+    month_param = request.GET.get('month', '').strip()
+    search_param = request.GET.get('q', '').strip()
+
+    category_id = None
+    if category_param.isascii() and category_param.isdigit() and len(category_param) <= 10:
+        try:
+            category_id = int(category_param)
+        except (ValueError, OverflowError):
+            category_id = None
+
+    start_date = None
+    end_date = None
+    if month_param:
+        try:
+            parts = month_param.split('-')
+            if len(parts) == 2:
+                year = int(parts[0])
+                month_num = int(parts[1])
+                if 1 <= month_num <= 12 and 1900 <= year <= 2100:
+                    _, last_day = calendar.monthrange(year, month_num)
+                    start_date = date(year, month_num, 1)
+                    end_date = date(year, month_num, last_day)
+        except (ValueError, TypeError):
+            start_date = None
+            end_date = None
+
+    transactions = get_filtered_transactions(
+        user_id=request.user.id,
+        category_id=category_id,
+        start_date=start_date,
+        end_date=end_date,
+        search=search_param if search_param else None,
+    )
+
+    response = HttpResponse(content_type='text/csv; charset=utf-8')
+    response['Content-Disposition'] = 'attachment; filename="transactions.csv"'
+
+    writer = csv.writer(response)
+    writer.writerow(['Date', 'Category', 'Amount', 'Description'])
+
+    for tx in transactions:
+        writer.writerow([
+            tx['tx_date'].strftime('%Y-%m-%d'),
+            _sanitize_csv_cell(tx['category_name']),
+            f"{tx['amount']:.2f}",
+            _sanitize_csv_cell(tx['note']),
+        ])
+
+    return response
+
 @login_required
 def add_transaction_view(request):
     """
@@ -179,3 +253,72 @@ def add_transaction_view(request):
         form = TransactionForm()
 
     return render(request, 'tracker/add_transaction.html', {'form': form})
+
+@login_required
+def transaction_history_view(request):
+    """
+    Renders filterable and paginated list of transactions for the authenticated user.
+    Supports filtering by category, calendar month, and substring search on notes.
+    """
+    category_param = request.GET.get('category', '').strip()
+    month_param = request.GET.get('month', '').strip()
+    search_param = request.GET.get('q', '').strip()
+
+    category_id = None
+    if category_param.isascii() and category_param.isdigit() and len(category_param) <= 10:
+        try:
+            category_id = int(category_param)
+        except (ValueError, OverflowError):
+            category_id = None
+
+    start_date = None
+    end_date = None
+    if month_param:
+        try:
+            parts = month_param.split('-')
+            if len(parts) == 2:
+                year = int(parts[0])
+                month_num = int(parts[1])
+                if 1 <= month_num <= 12 and 1900 <= year <= 2100:
+                    _, last_day = calendar.monthrange(year, month_num)
+                    start_date = date(year, month_num, 1)
+                    end_date = date(year, month_num, last_day)
+        except (ValueError, TypeError):
+            start_date = None
+            end_date = None
+
+    transactions = get_filtered_transactions(
+        user_id=request.user.id,
+        category_id=category_id,
+        start_date=start_date,
+        end_date=end_date,
+        search=search_param if search_param else None,
+    )
+
+    filtered_count = len(transactions)
+    filtered_total = sum((t['amount'] for t in transactions), Decimal('0.00'))
+
+    # Paginate results at 15 items per page
+    paginator = Paginator(transactions, 15)
+    page_number = request.GET.get('page', 1)
+    page_obj = paginator.get_page(page_number)
+
+    # Preserve active filter parameters across pagination links
+    query_dict = request.GET.copy()
+    if 'page' in query_dict:
+        del query_dict['page']
+    preserved_query = query_dict.urlencode()
+
+    categories = Category.objects.all().order_by('name')
+
+    context = {
+        'page_obj': page_obj,
+        'categories': categories,
+        'filtered_count': filtered_count,
+        'filtered_total': filtered_total,
+        'selected_category': category_id,
+        'selected_month': month_param,
+        'search_query': search_param,
+        'preserved_query': preserved_query,
+    }
+    return render(request, 'tracker/history.html', context)
