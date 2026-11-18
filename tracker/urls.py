@@ -9,6 +9,7 @@ from .forms import LoginForm
 
 urlpatterns = [
     path('', views.index, name='index'),
+    path('add/', views.add_transaction_view, name='add_transaction'),
     path('login/', auth_views.LoginView.as_view(
         template_name='registration/login.html',
         form_class=LoginForm,
